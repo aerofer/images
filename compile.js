@@ -7,10 +7,12 @@ const LOCATION = (process.env.LOCATION || 'images/*.{jpg,png,svg}');
 
 const plugins = [
   imageminJpegtran(),
-  imageminPngquant({quality: '90-95'}),
+  imageminPngquant({ quality: '60-80' }),
   imageminSvgo(),
 ];
 
-const files = await imagemin([LOCATION], 'out', { plugins });
+const finish = (files) => {
+  console.log(`🎉 ${files.length} images compressed`);
+};
 
-console.log(`🎉 ${files.length} images compressed`);
+imagemin([LOCATION], 'out', { plugins }).then(finish);
