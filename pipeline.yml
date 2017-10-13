@@ -120,11 +120,11 @@ Resources:
                 TemplatePath: SourceOutput::pipeline.yml
                 ParameterOverrides: !Sub |
                   {
-                    "Branch": ${Branch},
-                    "Project": ${Project},
+                    "Branch": "${Branch}",
+                    "Project": "${Project}",
                     "ImageBucket": { "Fn::GetParam": ["DeployOutput", "Outputs.json", "ImageBucket"]},
-                    "RepositoryName": ${Repository.Name},
-                    "ArtifactStore": ${PipelineArtifactStore}
+                    "RepositoryName": "${Repository.Name}",
+                    "ArtifactStore": "${PipelineArtifactStore}"
                   }
 
   UploadPipeline:
