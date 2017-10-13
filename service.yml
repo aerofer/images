@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Image CDN
+
+Parameters:
+
+  SubDomain:
+    Type: String
+    Description: Sub-domain to launch service under
+    Default: images
+
+Resources:
+
+  ImageBucket:
+    Type: AWS::S3::Bucket
+
+  ImageBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref ImageBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AddAnonPerm
+            Action:
+              - s3:GetObject
+            Effect: "Allow"
+            Resource:
+              - !Sub "${ImageBucket.Arn}/*"
+            Principal: "*"
+
+  AssetCDN:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Aliases:
+          - !Sub
+            - "${SubDomain}.${Domain}"
+            - Domain: !ImportValue DomainName
+        ViewerCertificate:
+          AcmCertificateArn: !ImportValue DomainWildcardCertificate
+          SslSupportMethod: sni-only
+        HttpVersion: http2
+        Origins:
+          - DomainName: !GetAtt ImageBucket.DomainName
+            Id: Images
+            S3OriginConfig: {}
+        DefaultCacheBehavior:
+          Compress: true
+          TargetOriginId: Images
+          ForwardedValues:
+            QueryString: false
+          ViewerProtocolPolicy: redirect-to-https
+
+  AliasHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Sub
+          - "${SubDomain}.${Domain}"
+          - Domain: !ImportValue DomainName
+        ResourcePath: /health.gif
+        RequestInterval: 30
+        FailureThreshold: 2
+      HealthCheckTags:
+      - Key: Name
+        Value: Image CDN Health
+
+  AliasRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !ImportValue DomainId
+      RecordSets:
+        - SetIdentifier:
+            Fn::Base64: !Sub
+              - "${SubDomain}.${AWS::Region}.${Domain}"
+              - Domain: !ImportValue DomainName
+          Name: !Sub
+            - "${SubDomain}.${Domain}"
+            - Domain: !ImportValue DomainName
+          Region: !Ref AWS::Region
+          Type: A
+          HealthCheckId: !Ref AliasHealthCheck
+          AliasTarget:
+            HostedZoneId: Z2FDTNDATAQYW2
+            EvaluateTargetHealth: true
+            DNSName: !GetAtt AssetCDN.DomainName
+
+Outputs:
+
+  ImageBucket:
+    Description: Bucket name for application static assets
+    Value:
+      Ref: ImageBucket

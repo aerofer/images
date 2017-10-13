@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: "Creates a build, test and deployment pipeline."
+
+Parameters:
+
+  Branch:
+    Type: String
+    Default: master
+    Description: Branch to use from the repository.
+
+  Project:
+    Type: String
+    Description: The name this project will be identified as inside AWS.
+
+  ImageBucket:
+    Type: String
+    Default: ""
+
+  RepositoryName:
+    Type: String
+    Default: ""
+
+  ArtifactStore:
+    Type: String
+    Default: ""
+
+Conditions:
+
+  DeployingAssets: !Not [!Equals [!Ref ImageBucket, ""]]
+
+  NotDeployingAssets: !Equals [!Ref ImageBucket, ""]
+
+Resources:
+
+  Repository:
+    Condition: NotDeployingAssets
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Ref Project
+
+  PipelineArtifactStore:
+    Condition: NotDeployingAssets
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Status: Enabled
+            ExpirationInDays: 1
+
+  Pipeline:
+    Condition: NotDeployingAssets
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name:
+        Ref: Project
+      RestartExecutionOnUpdate: false
+      ArtifactStore:
+        Location:
+          Ref: PipelineArtifactStore
+        Type: S3
+      RoleArn:
+        Fn::GetAtt: [PipelineRole, Arn]
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              RunOrder: 1
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                BranchName: !Ref Branch
+                RepositoryName: !GetAtt Repository.Name
+        - Name: Deploy
+          Actions:
+            - Name: Service
+              RunOrder: 1
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: DeployOutput
+              Configuration:
+                ActionMode: REPLACE_ON_FAILURE
+                Capabilities: CAPABILITY_IAM
+                RoleArn: !GetAtt CloudformationRole.Arn
+                StackName: !Ref Project
+                TemplatePath: SourceOutput::service.yml
+                OutputFileName: Outputs.json
+                ParameterOverrides: !Sub |
+                  {
+                    "SubDomain": "${Project}"
+                  }
+            - Name: Assets
+              RunOrder: 2
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              InputArtifacts:
+                - Name: SourceOutput
+                - Name: DeployOutput
+              Configuration:
+                ActionMode: REPLACE_ON_FAILURE
+                Capabilities: CAPABILITY_IAM
+                RoleArn: !GetAtt CloudformationRole.Arn
+                StackName: !Sub "${AWS::StackName}-assets"
+                TemplatePath: SourceOutput::pipeline.yml
+                ParameterOverrides: !Sub |
+                  {
+                    "Branch": ${Branch},
+                    "Project": ${Project},
+                    "ImageBucket": { "Fn::GetParam": ["DeployOutput", "Outputs.json", "ImageBucket"]},
+                    "RepositoryName": ${Repository.Name},
+                    "ArtifactStore": ${PipelineArtifactStore}
+                  }
+
+  UploadPipeline:
+    Condition: DeployingAssets
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref ArtifactStore
+        Type: S3
+      RoleArn: !GetAtt PipelineRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              RunOrder: 1
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                BranchName: !Ref Branch
+                RepositoryName: !Ref RepositoryName
+        - Name: Build
+          Actions:
+            - Name: Upload
+              RunOrder: 1
+              InputArtifacts:
+                - Name: SourceOutput
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ProjectName:
+                  Ref: Build
+        - Name: Delete
+          Actions:
+            - Name: Delete
+              RunOrder: 1
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: DELETE_ONLY
+                RoleArn: !GetAtt CloudformationRole.Arn
+                StackName:
+                  Ref: AWS::StackName
+
+  Build:
+    Condition: DeployingAssets
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name:
+        Ref: Project
+      TimeoutInMinutes: 5
+      ServiceRole: !GetAtt BuildRole.Arn
+      Source:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/nodejs:6.3.1
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Value: !Ref ImageBucket
+      Artifacts:
+        Type: CODEPIPELINE
+
+  BuildLogGroup:
+    Condition: DeployingAssets
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/codebuild/${Build}"
+      RetentionInDays: 1
+
+  CloudformationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: cloudformation.amazonaws.com
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+        - PolicyName: CloudFormationRole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - "*"
+                Effect: Allow
+                Resource:
+                  - "*"
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+        - PolicyName: CodePipelineAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:UploadArchive
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:CancelUploadArchive
+                Effect: Allow
+                Resource:
+                  - !GetAtt Repository.Arn
+              - Action:
+                  - 's3:*'
+                Effect: Allow
+                Resource:
+                  - Fn::Sub: "arn:aws:s3:::${PipelineArtifactStore}"
+                  - Fn::Sub: "arn:aws:s3:::${PipelineArtifactStore}/*"
+              - Action:
+                  - 'cloudformation:CreateStack'
+                  - 'cloudformation:DescribeStacks'
+                  - 'cloudformation:DeleteStack'
+                  - 'cloudformation:UpdateStack'
+                  - 'cloudformation:CreateChangeSet'
+                  - 'cloudformation:ExecuteChangeSet'
+                  - 'cloudformation:DeleteChangeSet'
+                  - 'cloudformation:DescribeChangeSet'
+                  - 'cloudformation:SetStackPolicy'
+                Effect: Allow
+                Resource:
+                  - Fn::Sub: "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:*/${Project}*/*"
+                  - '*'
+              - Action:
+                  - 'iam:PassRole'
+                Effect: Allow
+                Resource:
+                  - '*'
+
+  PipelineBuildPermissionsPolicy:
+    Condition: DeployingAssets
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: APIPermissions
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'codebuild:*'
+            Effect: Allow
+            Resource:
+              - Fn::Sub: "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${Build}"
+      Roles:
+        - Ref: PipelineRole
+
+  BuildRole:
+    Condition: DeployingAssets
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildPackageAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Effect: Allow
+                Resource: '*'
+              - Action:
+                  - 's3:*'
+                  - 'cloudformation:*'
+                Effect: Allow
+                Resource: '*'
+
+Outputs:
+
+  RepositoryCloneURL:
+    Condition: NotDeployingAssets
+    Description: Git clone URL
+    Value: !GetAtt Repository.CloneUrlHttp
+
+  RepositoryCloneSSH:
+    Condition: NotDeployingAssets
+    Description: Git clone URL
+    Value: !GetAtt Repository.CloneUrlSsh

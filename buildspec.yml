@@ -1,0 +1,15 @@
+version: 0.1
+
+phases:
+  install:
+    commands:
+      - echo "Installing..."
+      - npm install
+
+  build:
+    commands:
+      - echo "Compressing images..."
+      - npm run build
+
+      - echo "Uploading artifacts.."
+      - aws s3 cp out/ s3://$S3_BUCKET/ --recursive
